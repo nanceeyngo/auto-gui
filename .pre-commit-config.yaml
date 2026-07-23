@@ -1,0 +1,70 @@
+repos:
+  # ------------------------------------------------------------
+  # Pre-commit checks
+  # ------------------------------------------------------------
+  # ------------------------------------------------------------
+  # General sanity checks
+  # ------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+
+  # ------------------------------------------------------------
+  # Ruff
+  # ------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.13.0
+    hooks:
+      - id: ruff
+        args:
+          - --fix
+        stages: [pre-commit]
+      - id: ruff-format
+        stages: [pre-commit]
+
+  # ------------------------------------------------------------
+  # Pre-push checks
+  # ------------------------------------------------------------
+  - repo: local
+    hooks:
+      # ------------------------------------------------------------
+      # mypy
+      # ------------------------------------------------------------
+      - id: mypy
+        name: mypy
+        entry: poetry run mypy
+        language: system
+        pass_filenames: false
+        args:
+          - --config-file=pyproject.toml
+          - src
+        stages: [ pre-push ]
+
+      # ------------------------------------------------------------
+      # Pyright
+      # ------------------------------------------------------------
+      - id: pyright
+        name: pyright
+        entry: poetry run pyright
+        language: system
+        pass_filenames: false
+        stages: [ pre-push ]
+
+      # ------------------------------------------------------------
+      # Pyytest
+      # ------------------------------------------------------------
+      - id: pytest
+        name: pytest
+        entry: poetry run pytest
+        language: system
+        pass_filenames: false
+        stages: [ pre-push ]

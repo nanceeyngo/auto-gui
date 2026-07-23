@@ -1,0 +1,177 @@
+[tool.poetry]
+name = "auto-gui"
+version = "0.1.0"
+description = "Vision-based GUI automation agent with pluggable grounding providers."
+authors = ["Anthony Okoro <antoine.okoro@gmail.com>"]
+readme = "README.md"
+packages = [
+    { include = "agent", from = "src" },
+    { include = "grounding", from = "src" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+
+langchain = "^1.2.15"
+langchain-core = "^1.4.8"
+langgraph = "^1.1.6"
+
+pydantic = "^2.13"
+pydantic-settings = "^2.13"
+
+pyautogui = "^0.9.54"
+pywinctl = "^0.4"
+pillow = "^12.2"
+
+python-dotenv = "^1.2"
+
+langchain-openai = "^1.1.14"
+openai = "^1.52"
+vlmrun = "^0.6.5"
+
+types-Pillow = "*"
+types-python-dateutil = "*"
+
+[tool.poetry.group.dev.dependencies]
+ruff = "^0.13"
+mypy = "^1.18"
+pre-commit = "^5"
+
+pytest = "^9.1"
+pytest-asyncio = "^1.4"
+
+coverage = "^7.11"
+pyright = "^1.1"
+pytest-cov = "^7.0"
+
+[tool.pyright]
+include = ["src"]
+
+pythonVersion = "3.12"
+pythonPlatform = "All"
+
+typeCheckingMode = "strict"
+
+venvPath = "."
+venv = ".venv"
+
+reportMissingImports = true
+reportMissingTypeStubs = false
+
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+
+reportMissingParameterType = true
+reportMissingTypeArgument = true
+
+reportUnusedImport = true
+reportUnusedVariable = true
+
+reportPrivateUsage = false
+
+useLibraryCodeForTypes = true
+
+reportImportCycles = true
+reportUnnecessaryTypeIgnoreComment = true
+
+[tool.poetry.scripts]
+gui-agent = "agent.cli:main"
+
+[build-system]
+requires = ["poetry-core>=2.1.0"]
+build-backend = "poetry.core.masonry.api"
+
+# --------------------------------------------------------------------
+# Ruff
+# --------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 79
+target-version = "py312"
+
+
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "W",
+    "I",
+    "UP",
+    "B",
+    "SIM",
+    "C4",
+    "RUF",
+]
+
+ignore = [
+    "B008",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
+
+# --------------------------------------------------------------------
+# mypy
+# --------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.12"
+
+strict = true
+
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+warn_unreachable = true
+
+check_untyped_defs = true
+disallow_any_generics = true
+
+plugins = [
+    "pydantic.mypy",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "pyautogui.*",
+    "pywinctl.*",
+    "vlmrun.*",
+]
+ignore_missing_imports = true
+
+# --------------------------------------------------------------------
+# pytest
+# --------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]
+pythonpath = [
+    "src",
+]
+
+asyncio_mode = "auto"
+
+python_files = [
+    "test_*.py",
+]
+
+# --------------------------------------------------------------------
+# Coverage (future)
+# --------------------------------------------------------------------
+
+[tool.coverage.run]
+branch = true
+source = ["src"]
+
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
