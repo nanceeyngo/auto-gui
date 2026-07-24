@@ -14,7 +14,6 @@ def create_vlm() -> BaseChatModel:
     """
     Create a configured vision-language model.
     """
-
     return ChatOpenAI(
         model=settings.model,
         temperature=settings.temperature,

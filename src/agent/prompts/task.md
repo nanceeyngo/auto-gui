@@ -2,9 +2,7 @@
 
 Your objective is:
 
-{goal}
-
-{context}
+{task}
 
 ---
 
