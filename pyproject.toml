@@ -26,7 +26,7 @@ pillow = "^12.2"
 python-dotenv = "^1.2"
 
 langchain-openai = "^1.1.14"
-openai = "^1.52"
+openai = "^2.26"
 vlmrun = "^0.6.5"
 
 types-Pillow = "*"
