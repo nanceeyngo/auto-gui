@@ -9,6 +9,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Literal, cast
 
 from dotenv import find_dotenv
@@ -40,6 +41,7 @@ from ..exceptions import (
     GroundingTimeoutError,
     InvalidGroundingResultError,
 )
+from ..logging_utils import get_logger
 from ..models import (
     GroundingDetection,
     GroundingRequest,
@@ -48,10 +50,11 @@ from ..models import (
 )
 from .base import BaseGroundingProvider
 
-type Base64String = str | bytes
+logger = get_logger("grounding.providers.vlmrun")
+
+type DataUrlString = str | bytes
 type PromptMessages = list[ChatCompletionMessageParam]
 StreamingImageFormats = Literal["PNG", "JPEG", "binary"]
-_IMAGE_DATA_URL_PREFIX = "data:image/png;base64,"
 _DEFAULT_IMAGE_FORMAT: StreamingImageFormats = "PNG"
 
 
@@ -200,13 +203,9 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
             return final_prompt
 
         except FileNotFoundError as exc:
-            raise FileNotFoundError(
-                f"Schema file not found at: {schema_path}"
-            ) from exc
+            raise FileNotFoundError(f"Schema file not found at: {schema_path}") from exc
         except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Invalid JSON syntax in schema file: {exc}"
-            ) from exc
+            raise ValueError(f"Invalid JSON syntax in schema file: {exc}") from exc
 
     @staticmethod
     def _build_user_prompt(
@@ -223,9 +222,7 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
                 f"{request.confidence_threshold}."
             )
 
-        parts.append(
-            "Return only the JSON object specified by the system prompt."
-        )
+        parts.append("Return only the JSON object specified by the system prompt.")
 
         return " ".join(parts)
 
@@ -251,34 +248,53 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
         image: ImageLike,
         *,
         image_format: StreamingImageFormats = _DEFAULT_IMAGE_FORMAT,
-    ) -> Base64String:
+    ) -> DataUrlString:
+        """
+        Returns a complete `data:image/<format>;base64,<payload>` URI.
+
+        NOTE: `vlmrun.common.image.encode_image` already returns a
+        full data URL (not a bare base64 payload) when `image_format`
+        is "PNG" or "JPEG". Callers must use the return value as-is;
+        re-prefixing it with a data URL scheme produces a corrupted,
+        doubly-prefixed URL that the model cannot decode.
+        """
         if isinstance(image, Image.Image):
-            base64_str: Base64String = encode_image(image, format=image_format)
+            data_url: DataUrlString = encode_image(image, format=image_format)
         else:
             try:
                 with Image.open(image) as open_image:
-                    base64_str = encode_image(open_image, format=image_format)
+                    data_url = encode_image(open_image, format=image_format)
             except OSError as exc:
                 raise GroundingRequestError(
                     f"Failed to load image from {image!r}: {exc}"
                 ) from exc
 
-        return base64_str
+        return data_url
 
     def _build_messages(
         self,
         request: GroundingRequest,
     ) -> PromptMessages:
-        system_prompt_template = self._load_prompt(
-            self.settings.system_prompt_filepath
-        )
+        system_prompt_template = self._load_prompt(self.settings.system_prompt_filepath)
         system_prompt = self._inject_schema_into_prompt(
             self.settings.grounding_schema_filepath,
             system_prompt_template,
             output_json_schema="",
         )
         user_prompt = self._build_user_prompt(request)
-        base64_str = self._encode_image(request.image)
+        data_url = self._encode_image(request.image)
+
+        # `data_url` is already a complete `data:image/...;base64,...`
+        # URI (see `_encode_image`'s docstring) and must be used
+        # as-is. Two bugs were previously stacked here: (1) the SDK's
+        # already-complete data URL was concatenated onto a second,
+        # hardcoded `data:image/png;base64,` prefix, and (2) the
+        # payload was embedded via `!r` (Python repr), which wraps it
+        # in quotes/escapes. Either bug alone corrupts every image
+        # sent to the model; together they produced a doubly-prefixed,
+        # repr-quoted, completely undecodable URL.
+        if isinstance(data_url, bytes):
+            data_url = data_url.decode("ascii")
 
         messages: PromptMessages = [
             ChatCompletionSystemMessageParam(
@@ -288,14 +304,10 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
             ChatCompletionUserMessageParam(
                 role="user",
                 content=[
-                    ChatCompletionContentPartTextParam(
-                        type="text", text=user_prompt
-                    ),
+                    ChatCompletionContentPartTextParam(type="text", text=user_prompt),
                     ChatCompletionContentPartImageParam(
                         type="image_url",
-                        image_url={
-                            "url": f"{_IMAGE_DATA_URL_PREFIX}{base64_str!r}"
-                        },
+                        image_url={"url": data_url},
                     ),
                 ],
             ),
@@ -307,6 +319,8 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
         self,
         messages: PromptMessages,
     ) -> PredictionResponse:
+        started = perf_counter()
+
         try:
             raw_response = self.client.agent.completions.create(
                 model=self.settings.model,
@@ -327,14 +341,46 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
                 response=response_content,
             )
 
+            elapsed_ms = (perf_counter() - started) * 1000.0
+            logger.debug(
+                "vlmrun prediction completed",
+                extra={
+                    "context": {
+                        "backend": self.provider_id,
+                        "model": self.settings.model,
+                        "prediction_id": raw_response.id,
+                        "elapsed_ms": round(elapsed_ms, 2),
+                    }
+                },
+            )
+
             return prediction
 
         except RequestTimeoutError as exc:
+            logger.warning(
+                "vlmrun request timed out",
+                extra={
+                    "context": {
+                        "backend": self.provider_id,
+                        "model": self.settings.model,
+                    }
+                },
+            )
             raise GroundingTimeoutError(
                 "Timed out while communicating with VLM Run."
             ) from exc
 
         except (APIError, RateLimitError, ServerError, VLMRunError) as exc:
+            logger.error(
+                "vlmrun API error",
+                extra={
+                    "context": {
+                        "backend": self.provider_id,
+                        "model": self.settings.model,
+                        "exception_type": type(exc).__name__,
+                    }
+                },
+            )
             raise GroundingProviderError(f"VLM Run API error: {exc}") from exc
 
     def _wait_for_prediction(
@@ -388,8 +434,11 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
 
         detections: list[GroundingDetection] = []
 
+        skipped = 0
+
         for item in raw_detections:
             if not isinstance(item, Mapping):
+                skipped += 1
                 continue
 
             bbox = item.get("bbox")
@@ -399,16 +448,14 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
                 or isinstance(bbox, (str, bytes))
                 or len(bbox) != 4
             ):
+                skipped += 1
                 continue
 
-            if not all(
-                isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in bbox
-            ):
+            if not all(isinstance(v, (int, float)) and 0.0 <= v <= 1.0 for v in bbox):
+                skipped += 1
                 continue
 
-            bounding_box = self.make_bounding_box(
-                bbox, image_width, image_height
-            )
+            bounding_box = self.make_bounding_box(bbox, image_width, image_height)
 
             confidence = self._parse_confidence(item.get("confidence"))
 
@@ -425,6 +472,18 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
                 )
             )
 
+        if skipped:
+            logger.warning(
+                "vlmrun response contained malformed detection payloads",
+                extra={
+                    "context": {
+                        "backend": self.provider_id,
+                        "skipped_count": skipped,
+                        "accepted_count": len(detections),
+                    }
+                },
+            )
+
         return detections
 
     def _locate(
@@ -434,9 +493,7 @@ class VLMRunGroundingProvider(BaseGroundingProvider):
         messages = self._build_messages(request)
         prediction = self._submit_prediction(messages)
         prediction = self._wait_for_prediction(prediction)
-        detections = self._parse_prediction(
-            request=request, prediction=prediction
-        )
+        detections = self._parse_prediction(request=request, prediction=prediction)
 
         return self.make_response(
             request=request,
