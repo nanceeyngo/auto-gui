@@ -125,6 +125,24 @@ class WaitToolInput(BaseModel):
     seconds: float
 
 
+class CaptureScreenToolInput(BaseModel):
+    """
+    Input for the capture_screen tool. Takes no arguments; the only
+    parameter that tool's underlying function accepts is the injected
+    `Runtime[AgentContext]`, which every other tool in this module
+    also receives but never needs an explicit empty schema for
+    because they all declare an `args_schema` with real fields.
+
+    `capture_screen` is the one tool with zero business arguments, and
+    without this explicit (empty) schema, LangChain falls back to
+    auto-inferring one from the function signature -- which walks into
+    `AgentContext` and hits `ScreenshotResult.image: PIL.Image.Image`,
+    an arbitrary type Pydantic cannot render as JSON Schema, breaking
+    `bind_tools()` for every tool the moment `capture_screen` is
+    registered.
+    """
+
+
 class ScreenshotToolResult(BaseModel):
     path: Path
     width: int

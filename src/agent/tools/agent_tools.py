@@ -18,6 +18,7 @@ from ..context import AgentContext
 from ..logging_config import get_logger
 from .action.action_models import ActionResult
 from .tool_models import (
+    CaptureScreenToolInput,
     ClickTargetToolInput,
     ClickToolInput,
     DragToolInput,
@@ -42,6 +43,7 @@ _SAME_ELEMENT_PIXEL_TOLERANCE = 12.0
 
 
 @tool(
+    args_schema=CaptureScreenToolInput,
     description=(
         "Capture the current screen and return the path to the screenshot "
         "with the screenshot's width and height."
