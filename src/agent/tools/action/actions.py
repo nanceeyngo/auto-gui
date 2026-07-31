@@ -18,6 +18,8 @@ from grounding.models import (
 )
 
 from ...config import settings
+from ...logging_config import get_logger
+from ..coordinates import CoordinateMapper
 from .action_models import (
     Action,
     ActionResult,
@@ -26,6 +28,8 @@ from .action_models import (
     MouseButton,
     MousePosition,
 )
+
+logger = get_logger("agent.tools.action")
 
 # ---------------------------------------------------------------------------
 # Manager Class
@@ -38,6 +42,7 @@ class ActionManager:
     """
 
     __slots__ = (
+        "_coordinate_mapper",
         "_failsafe",
         "_post_action_delay",
     )
@@ -46,11 +51,18 @@ class ActionManager:
         self,
         post_action_delay: float = 0.5,
         failsafe: bool = True,
+        *,
+        coordinate_mapper: CoordinateMapper | None = None,
     ) -> None:
         self._post_action_delay = post_action_delay
         self._failsafe = failsafe
 
         pyautogui.FAILSAFE = failsafe
+
+        self._coordinate_mapper = coordinate_mapper or CoordinateMapper(
+            physical_size_fn=lambda: pyautogui.screenshot().size,
+            logical_size_fn=pyautogui.size,
+        )
 
     # -------------------------------------------------------------------------
     # Internal helpers
@@ -71,33 +83,44 @@ class ActionManager:
         target: ActionTarget,
     ) -> MousePosition:
         """
-        Resolve an action target into an absolute screen position.
+        Resolve an action target into an absolute *logical* screen
+        position suitable for OS input APIs.
+
+        All incoming coordinates (raw tuples, bounding boxes, and
+        grounding detections) are treated as screenshot-space pixel
+        coordinates, since that is the coordinate system every
+        grounding provider operates in. They are converted to logical
+        OS coordinates via the coordinate mapper to remain correct on
+        High-DPI/Retina displays where screenshot pixel resolution
+        differs from the OS logical coordinate space.
         """
         if isinstance(target, tuple):
             if len(target) != 2:
-                raise ValueError(
-                    "Coordinate tuple must contain exactly two integers."
-                )
+                raise ValueError("Coordinate tuple must contain exactly two integers.")
 
-            x, y = target
+            raw_x, raw_y = target
+            x, y = self._coordinate_mapper.to_logical(int(raw_x), int(raw_y))
 
             return MousePosition(
-                x=int(x),
-                y=int(y),
+                x=x,
+                y=y,
             )
 
         if isinstance(target, BoundingBox):
-            return self._center_of_bbox(target)
+            bbox_position = self._center_of_bbox(target)
+        else:
+            try:
+                bbox_position = self._center_of_bbox(target.bbox)
+            except (AttributeError, ValueError) as exc:
+                raise TypeError(
+                    f"Unsupported action target type: {type(target)!r}"
+                ) from exc
 
-        try:
-            center = self._center_of_bbox(
-                target.bbox,
-            )
-            return center
-        except (AttributeError, ValueError) as exc:
-            raise TypeError(
-                f"Unsupported action target type: {type(target)!r}"
-            ) from exc
+        logical_x, logical_y = self._coordinate_mapper.to_logical(
+            bbox_position.x, bbox_position.y
+        )
+
+        return MousePosition(x=logical_x, y=logical_y)
 
     def _move_to(
         self,
@@ -118,22 +141,50 @@ class ActionManager:
 
         return position
 
-    @staticmethod
     def _make_result(
+        self,
         *,
         action: Action,
         position: MousePosition | None = None,
         message: str | None = None,
+        started: float | None = None,
     ) -> ActionResult:
         """
         Construct a successful ActionResult.
+
+        When ``started`` (a ``time.perf_counter()`` timestamp taken at
+        the start of the action) is provided, the elapsed execution
+        time is recorded on the result and emitted as a structured log
+        event, giving visibility into per-action latency.
         """
-        return ActionResult(
+        latency_ms = (
+            (time.perf_counter() - started) * 1000.0 if started is not None else None
+        )
+
+        result = ActionResult(
             success=True,
             action=action,
             position=position,
             message=message,
+            latency_ms=latency_ms,
         )
+
+        logger.info(
+            "Executed GUI action",
+            extra={
+                "context": {
+                    "action": action,
+                    "position": (
+                        (position.x, position.y) if position is not None else None
+                    ),
+                    "latency_ms": (
+                        round(latency_ms, 2) if latency_ms is not None else None
+                    ),
+                }
+            },
+        )
+
+        return result
 
     def _wait_for_gui(self) -> None:
         """
@@ -185,6 +236,7 @@ class ActionManager:
         """
         Move the mouse to a target.
         """
+        started = time.perf_counter()
         start = self.mouse_position()
         position = self._move_to(
             target,
@@ -198,6 +250,7 @@ class ActionManager:
                 f"Moved cursor from ({start.x}, {start.y}) "
                 f"to ({position.x}, {position.y})."
             ),
+            started=started,
         )
 
     def click(
@@ -212,6 +265,7 @@ class ActionManager:
         """
         Click a target.
         """
+        started = time.perf_counter()
         position = self._move_to(
             target,
             duration=duration,
@@ -235,6 +289,7 @@ class ActionManager:
                 f"{str(clicks) + ' times' if clicks > 1 else 'once'} "
                 f"at ({position.x}, {position.y})."
             ),
+            started=started,
         )
 
     def double_click(
@@ -297,6 +352,8 @@ class ActionManager:
         """
         Drag from one target to another.
         """
+        started = time.perf_counter()
+
         if start is not None:
             start_position = self._move_to(start)
         else:
@@ -322,6 +379,7 @@ class ActionManager:
                 f"to "
                 f"({end_position.x}, {end_position.y})."
             ),
+            started=started,
         )
 
     def drag_to(
@@ -385,9 +443,7 @@ class ActionManager:
                 f"by {clicks} clicks."
             )
 
-        return self._make_result(
-            action="scroll", position=position, message=message
-        )
+        return self._make_result(action="scroll", position=position, message=message)
 
     def hscroll(
         self,
@@ -416,9 +472,7 @@ class ActionManager:
                 f"by {clicks} clicks."
             )
 
-        return self._make_result(
-            action="scroll", position=position, message=message
-        )
+        return self._make_result(action="scroll", position=position, message=message)
 
     # -------------------------------------------------------------------------
     # Keyboard actions

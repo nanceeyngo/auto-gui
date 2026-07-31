@@ -75,3 +75,5 @@ class ActionResult(BaseModel):
     position: MousePosition | None = None
 
     message: str | None = None
+
+    latency_ms: float | None = None
