@@ -42,8 +42,7 @@ class AgentSettings(BaseSettings):
         default=30,
         gt=0,
         description=(
-            "Maximum number of reasoning/tool-use iterations "
-            "before the agent stops."
+            "Maximum number of reasoning/tool-use iterations before the agent stops."
         ),
     )
 
@@ -51,8 +50,7 @@ class AgentSettings(BaseSettings):
         default=0.5,
         ge=0.0,
         description=(
-            "Delay (seconds) after GUI actions before taking "
-            "the next screenshot."
+            "Delay (seconds) after GUI actions before taking the next screenshot."
         ),
     )
 
@@ -72,6 +70,22 @@ class AgentSettings(BaseSettings):
         default=120.0,
         gt=0,
         description="Timeout for LLM requests.",
+    )
+
+    max_tokens: int | None = Field(
+        default=2048,
+        gt=0,
+        description=(
+            "Maximum number of tokens the language model may generate "
+            "per turn. Left unset, ChatOpenAI does not cap output "
+            "tokens, which some backends (e.g. OpenRouter) interpret as "
+            "'request the model's full context window' -- this can "
+            "fail with a 402 (insufficient credits) even on a healthy "
+            "account if the account's remaining balance can't cover a "
+            "worst-case 32K-64K token response. A GUI-automation tool- "
+            "calling turn rarely needs anywhere near that; lower this "
+            "further if you're on a constrained budget."
+        ),
     )
 
     max_tool_calls: int = Field(
