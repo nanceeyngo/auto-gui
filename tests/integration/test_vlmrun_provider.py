@@ -5,9 +5,10 @@ These tests verify that the provider correctly orchestrates the
 request lifecycle while mocking the VLM Run SDK.
 """
 
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
+from pydantic import SecretStr
 
 from grounding.models import (
     BoundingBox,
@@ -27,7 +28,12 @@ from grounding.providers.vlmrun import (
 @pytest.fixture
 def provider() -> VLMRunGroundingProvider:
     provider = VLMRunGroundingProvider()
-    provider._settings = VLMRunSettings()
+    # A dummy key is supplied so `_initialize()` can construct the SDK
+    # client without requiring a real VLMRUN_API_KEY in the ambient
+    # environment. Without this, `test_initialize_creates_client`
+    # would only pass on machines that happen to have real
+    # credentials configured, breaking fully-offline test execution.
+    provider._settings = VLMRunSettings(api_key=SecretStr("test-dummy-api-key"))
     return provider
 
 
@@ -49,9 +55,15 @@ def grounding_request() -> GroundingRequest:
 def test_initialize_creates_client(
     provider: VLMRunGroundingProvider,
 ) -> None:
-    provider._initialize()
+    # The VLMRun SDK constructor performs a live network call (a
+    # health check) when instantiated, which previously made this
+    # test silently depend on internet access and real credentials.
+    # Patch the SDK class so `_initialize()` is fully offline.
+    with patch("grounding.providers.vlmrun.VLMRun", autospec=True) as mock_client_cls:
+        provider._initialize()
 
-    assert provider._client is not None
+        mock_client_cls.assert_called_once()
+        assert provider._client is mock_client_cls.return_value
 
 
 def test_close_clears_client(
@@ -72,7 +84,7 @@ def test_close_clears_client(
 def test_locate_calls_pipeline_in_order(
     provider: VLMRunGroundingProvider,
     grounding_request: GroundingRequest,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     messages = [{"role": "user"}]
 
@@ -148,8 +160,8 @@ def test_locate_calls_pipeline_in_order(
 def test_locate_returns_empty_response(
     provider: VLMRunGroundingProvider,
     grounding_request: GroundingRequest,
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         provider,
         "_build_messages",
@@ -199,9 +211,9 @@ def test_locate_returns_empty_response(
 def test_pipeline_errors_are_not_swallowed(
     provider: VLMRunGroundingProvider,
     grounding_request: GroundingRequest,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     method: str,
-):
+) -> None:
     prediction = Mock()
 
     monkeypatch.setattr(
@@ -253,8 +265,8 @@ def test_pipeline_errors_are_not_swallowed(
 def test_response_contains_request_metadata(
     provider: VLMRunGroundingProvider,
     grounding_request: GroundingRequest,
-    monkeypatch,
-):
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     detection = provider.make_detection(
         bounding_box=BoundingBox(
             x1=5,
