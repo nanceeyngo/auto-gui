@@ -12,6 +12,8 @@ from pydantic import BaseModel
 
 from .config import settings
 from .context import AgentContext, AgentServices
+from .exceptions import AgentExecutionError
+from .logging_config import get_logger
 from .prompts import (
     get_prompt,
     get_system_prompt,
@@ -21,6 +23,8 @@ from .tools.agent_tools import GUI_AGENT_TOOLS
 from .tools.grounding import GroundingManager
 from .tools.screenshot.screenshot import ScreenshotManager
 from .vlm import create_vlm
+
+logger = get_logger("agent.agent")
 
 
 class GUIAgentState(BaseModel):
@@ -45,9 +49,7 @@ class GUIAutomationAgent:
 
         self._services = services or AgentServices(
             grounding=GroundingManager(),
-            screenshots=ScreenshotManager(
-                directory=settings.screenshot_directory
-            ),
+            screenshots=ScreenshotManager(directory=settings.screenshot_directory),
             actions=ActionManager(),
             config=settings,
         )
@@ -98,12 +100,43 @@ class GUIAutomationAgent:
     ) -> str:
         state, context = self._begin_run(task)
 
-        result = await self._agent.ainvoke(
-            cast(Any, state),
-            context=context,
+        logger.info(
+            "Agent run starting",
+            extra={"context": {"goal": task}},
         )
 
+        try:
+            result = await self._agent.ainvoke(
+                cast(Any, state),
+                context=context,
+            )
+        except Exception as exc:
+            logger.error(
+                "Agent run failed",
+                extra={
+                    "context": {
+                        "goal": task,
+                        "exception_type": type(exc).__name__,
+                    }
+                },
+                exc_info=True,
+            )
+            raise AgentExecutionError(
+                f"Agent run failed while executing task {task!r}: {exc}",
+                goal=task,
+            ) from exc
+
         last_message_content: str = result["messages"][-1].content
+
+        logger.info(
+            "Agent run completed",
+            extra={
+                "context": {
+                    "goal": task,
+                    "iterations": context.iteration,
+                }
+            },
+        )
 
         return last_message_content
 
@@ -113,12 +146,43 @@ class GUIAutomationAgent:
     ) -> str:
         state, context = self._begin_run(task)
 
-        result = self._agent.invoke(
-            cast(Any, state),
-            context=context,
+        logger.info(
+            "Agent run starting",
+            extra={"context": {"goal": task}},
         )
 
+        try:
+            result = self._agent.invoke(
+                cast(Any, state),
+                context=context,
+            )
+        except Exception as exc:
+            logger.error(
+                "Agent run failed",
+                extra={
+                    "context": {
+                        "goal": task,
+                        "exception_type": type(exc).__name__,
+                    }
+                },
+                exc_info=True,
+            )
+            raise AgentExecutionError(
+                f"Agent run failed while executing task {task!r}: {exc}",
+                goal=task,
+            ) from exc
+
         last_message_content: str = result["messages"][-1].content
+
+        logger.info(
+            "Agent run completed",
+            extra={
+                "context": {
+                    "goal": task,
+                    "iterations": context.iteration,
+                }
+            },
+        )
 
         return last_message_content
 

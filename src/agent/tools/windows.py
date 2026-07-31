@@ -8,6 +8,10 @@ import pywinctl
 from langchain_core.tools import tool
 from pydantic import BaseModel, ConfigDict
 
+from ..logging_config import get_logger
+
+logger = get_logger("agent.tools.windows")
+
 
 class WindowInfo(BaseModel):
     """
@@ -109,9 +113,7 @@ class WindowManager:
         )
 
         if exact:
-            windows = tuple(
-                window for window in windows if window.title == title
-            )
+            windows = tuple(window for window in windows if window.title == title)
 
         return windows
 
@@ -217,7 +219,16 @@ class WindowManager:
         try:
             window.restore()
         except Exception as exc:
-            print(f"Error activating window '{title}': {exc}")
+            logger.warning(
+                "Failed to restore window after activation",
+                extra={
+                    "context": {
+                        "title": title,
+                        "exception_type": type(exc).__name__,
+                        "exception": str(exc),
+                    }
+                },
+            )
 
         return _to_window_info(window)
 

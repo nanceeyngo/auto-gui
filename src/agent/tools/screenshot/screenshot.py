@@ -5,6 +5,7 @@ Screenshot capture utilities for the GUI automation agent.
 import shutil
 import uuid
 from pathlib import Path
+from time import perf_counter
 from typing import Self
 
 import pywinctl
@@ -13,9 +14,12 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 from ...config import settings
+from ...logging_config import get_logger
 from ..windows import WindowInfo
 from .backend import ScreenshotBackend
 from .pyautogui_backend import PyAutoGuiScreenshotBackend
+
+logger = get_logger("agent.tools.screenshot")
 
 
 class ScreenshotResult(BaseModel):
@@ -68,14 +72,10 @@ class ScreenshotResult(BaseModel):
                 path,
             )
             if not path.exists():
-                raise FileNotFoundError(
-                    f"Screenshot path does not exist: {path}"
-                )
+                raise FileNotFoundError(f"Screenshot path does not exist: {path}")
 
             if not path.is_file():
-                raise IsADirectoryError(
-                    f"Screenshot path is not a file: {path}"
-                )
+                raise IsADirectoryError(f"Screenshot path is not a file: {path}")
 
             try:
                 with Image.open(path) as image:
@@ -96,8 +96,7 @@ class ScreenshotResult(BaseModel):
 
         if height != image_height:
             raise ValueError(
-                f"height ({height}) does not match "
-                f"image height ({image_height})."
+                f"height ({height}) does not match " f"image height ({image_height})."
             )
 
         object.__setattr__(
@@ -187,9 +186,7 @@ class ScreenshotManager:
             ScreenshotResult,
         ] = {}
 
-        self._backend = (
-            backend if backend is not None else PyAutoGuiScreenshotBackend()
-        )
+        self._backend = backend if backend is not None else PyAutoGuiScreenshotBackend()
 
     # ------------------------------------------------------------------
     # Directory helpers
@@ -245,13 +242,26 @@ class ScreenshotManager:
         """
         Capture the entire desktop.
         """
+        started = perf_counter()
         image = self._backend.capture()
-
-        return self._store_image(
+        result = self._store_image(
             image,
             left=0,
             top=0,
         )
+
+        logger.debug(
+            "Captured full-desktop screenshot",
+            extra={
+                "context": {
+                    "width": result.width,
+                    "height": result.height,
+                    "elapsed_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            },
+        )
+
+        return result
 
     def capture_region(
         self,
@@ -264,18 +274,33 @@ class ScreenshotManager:
         """
         Capture a rectangular region.
         """
+        started = perf_counter()
         image = self._backend.capture_region(
             left=left,
             top=top,
             width=width,
             height=height,
         )
-
-        return self._store_image(
+        result = self._store_image(
             image,
             left=left,
             top=top,
         )
+
+        logger.debug(
+            "Captured region screenshot",
+            extra={
+                "context": {
+                    "left": left,
+                    "top": top,
+                    "width": width,
+                    "height": height,
+                    "elapsed_ms": round((perf_counter() - started) * 1000, 2),
+                }
+            },
+        )
+
+        return result
 
     def capture_window(
         self,
@@ -311,9 +336,7 @@ class ScreenshotManager:
             match the supplied title.
         """
         if (window is None) == (title is None):
-            raise ValueError(
-                "Exactly one of 'window' or 'title' must be provided."
-            )
+            raise ValueError("Exactly one of 'window' or 'title' must be provided.")
 
         if window is None and title is not None:
             windows = pywinctl.getWindowsWithTitle(title)
@@ -371,9 +394,7 @@ class ScreenshotManager:
                 path = screenshot
 
             if path not in self._results:
-                raise RuntimeError(
-                    f'No managed screenshot at the path: "{path}".'
-                )
+                raise RuntimeError(f'No managed screenshot at the path: "{path}".')
 
             paths = (path,)
 
