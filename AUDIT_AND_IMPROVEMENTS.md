@@ -101,6 +101,10 @@ original exception as `__cause__` and the task goal attached, for both
 `run()` and `arun()`); `tests/test_windows.py` (restore failures don't
 propagate and are logged).
 
+**This paid off directly during real-world testing** — see §1.6 and §1.7
+below, both of which were discovered from clean, actionable
+`AgentExecutionError` output on a live CLI run instead of a raw crash.
+
 ---
 
 ### 1.4 Non-hermetic tests that depended on live network access / real credentials
@@ -141,47 +145,94 @@ key so it never depends on ambient credentials.
 
 ---
 
+### 1.6 `capture_screen` tool had no explicit `args_schema` (found via live CLI run)
+
+**Files:** `src/agent/tools/tool_models.py`, `src/agent/tools/agent_tools.py`
+
+Surfaced after this audit's initial pass, running the CLI end-to-end against
+a real chat model:
+
+```
+pydantic.errors.PydanticInvalidForJsonSchema: Failed to generate JSON
+schema for 'capture_screen': Cannot generate a JsonSchema for
+core_schema.IsInstanceSchema (<class 'PIL.Image.Image'>)
+```
+
+`capture_screen` was the only tool in `GUI_AGENT_TOOLS` registered without
+an explicit `args_schema`. Its function's only parameter is the injected
+`Runtime[AgentContext]`, so LangChain fell back to auto-inferring a schema
+from the function signature — which walked into `AgentContext` and hit
+`ScreenshotResult.image: PIL.Image.Image`, an arbitrary type Pydantic
+cannot render as JSON Schema. This broke `model.bind_tools(GUI_AGENT_TOOLS)`
+for **every** tool the moment `capture_screen` was included in the list —
+not just `capture_screen` itself.
+
+Notably, the main-loop error handling added in §1.3 worked exactly as
+intended here: instead of a raw, unhandled traceback, the CLI printed a
+clean `Error: Agent run failed while executing task '...'` with the root
+cause, from a logged `AgentExecutionError`.
+
+**Why this wasn't caught by the earlier test pass:** `tests/test_agent.py`'s
+fake chat models override `bind_tools()` entirely (to avoid needing a real
+model backend for basic run/exception-handling tests), which bypasses the
+real JSON-schema-conversion code path this bug lives in.
+
+**Fix:** added an explicit, empty `CaptureScreenToolInput` schema, matching
+every other tool in the module.
+
+**Regression tests:** `tests/test_tool_schemas.py` — exercises the real
+`langchain_core.utils.function_calling.convert_to_openai_tool` conversion
+(the same one `bind_tools()` uses) against every tool in `GUI_AGENT_TOOLS`,
+with no chat model involved, so this class of bug can't hide behind a test
+double again. Also asserts no tool ships without an explicit `args_schema`,
+guarding against a future tool reintroducing the same failure mode.
+
+---
+
+### 1.7 Unbounded `max_tokens` caused OpenRouter 402s (found via live CLI run)
+
+**Files:** `src/agent/config.py`, `src/agent/vlm.py`
+
+Surfaced immediately after fixing §1.6, on the next live CLI run:
+
+```
+openai.APIStatusError: Error code: 402 - This request requires more
+credits, or fewer max_tokens. You requested up to 65536 tokens, but
+can only afford 2097. To increase, visit
+https://openrouter.ai/settings/credits...
+```
+
+`create_vlm()` constructed `ChatOpenAI` with no `max_tokens` at all.
+OpenAI-compatible gateways such as OpenRouter interpret an unset
+`max_tokens` as "reserve up to the model's full context window" for
+every single request — regardless of how many output tokens a turn
+actually needs. A GUI-automation tool-calling turn needs nowhere near
+65536 output tokens, so this failed outright on any account without a
+large credit balance, independent of whether the account is otherwise
+healthy.
+
+**Fix:** added a configurable `AgentSettings.max_tokens`
+(`AGENT_MAX_TOKENS`, default `4096`), wired through `create_vlm()`.
+Settable to `null`/unset to restore the old unbounded behavior if a
+given backend needs it. Documented in `.env.example`.
+
+**Tests:** `tests/test_vlm.py` — asserts `create_vlm()` passes the
+configured value through, that it can be explicitly disabled, and
+that the default is a positive, bounded value.
+
+---
+
 ## 2. Test coverage: before vs. after
 
 Coverage measured with `pytest --cov=src --cov-report=term-missing`.
 
 | | Before | After |
 |---|---|---|
-| Test files | 2 test modules (`tests/test_registry.py`, `tests/test_client.py`, `tests/test_client_async.py`, `tests/integration/*`) — **grounding package only** | 14 test modules covering both `grounding` and `agent` packages |
-| Test count | 94 | **358** |
+| Test files | 2 test modules (`tests/test_registry.py`, `tests/test_client.py`, `tests/test_client_async.py`, `tests/integration/*`) — **grounding package only** | 16 test modules covering both `grounding` and `agent` packages |
+| Test count | 94 | **364** |
 | `src/agent/*` coverage | **0%** (untested; every module imports `pyautogui`/`pywinctl`, which require a live display and previously made the package uncollectable in headless CI) | **~85-95%** across `agent.py`, `actions.py`, `coordinates.py`, `screenshot.py`, `windows.py`; `agent_tools.py` ~71% |
 | `src/grounding/*` coverage | ~70-85% on individual modules, **32% overall** (client fallback path didn't exist yet; several branches in `base.py`/`interfaces.py`/`vlmrun.py` untested) | **~78-98%** across modules |
 | **Overall (`src/`)** | **32%** | **82%** |
-
-Full per-module breakdown (after):
-
-```
-Name                                              Stmts   Miss  Cover
----------------------------------------------------------------------
-src/agent/agent.py                                   90      7    92%
-src/agent/cli.py                                     61     61     0%
-src/agent/context.py                                 49      9    78%
-src/agent/prompts.py                                 40     11    69%
-src/agent/tools/action/actions.py                   178     24    86%
-src/agent/tools/action/actions_async.py              41     41     0%
-src/agent/tools/agent_tools.py                      114     34    71%
-src/agent/tools/coordinates.py                        52      1    95%
-src/agent/tools/grounding.py                         39     11    72%
-src/agent/tools/screenshot/backend.py                 9      2    78%
-src/agent/tools/screenshot/pyautogui_backend.py      10      4    60%
-src/agent/tools/screenshot/screenshot.py            174     17    89%
-src/agent/tools/windows.py                          109      8    94%
-src/agent/vlm.py                                     12      3    75%
-src/grounding/client.py                             146      9    94%
-src/grounding/interfaces.py                          85     17    76%
-src/grounding/logging_utils.py                       40      9    72%
-src/grounding/models.py                             115      2    98%
-src/grounding/providers/base.py                     158     14    89%
-src/grounding/providers/vlmrun.py                   193     42    78%
-src/grounding/registry.py                            55      6    89%
----------------------------------------------------------------------
-TOTAL                                              1929    332    82%
-```
 
 **Known remaining gaps** (called out explicitly rather than hidden):
 
@@ -212,7 +263,7 @@ audit added lightweight, deterministic fakes for `pyautogui`/`pywinctl`
 collection (`conftest.py`), following the same "mock the backend to allow
 offline execution" principle the codebase already applies to grounding
 providers. This makes the entire suite platform-independent and fast
-(**358 tests in ~5 seconds**, no display, no network, no GPU).
+(**364 tests in under 15 seconds**, no display, no network, no GPU).
 
 ---
 
@@ -322,6 +373,10 @@ including that a screenshot is taken on every attempt).
   with acceptable confidence, would trade cost for latency where that's
   the priority. `alocate_with_fallback`'s structure makes this a relatively
   small follow-up change.
+- **Bound output tokens per turn (see §1.7).** Beyond just avoiding 402s,
+  a tighter, empirically-tuned `AGENT_MAX_TOKENS` also caps worst-case
+  per-turn latency, since token generation time scales with the cap even
+  when the model stops early most of the time.
 
 ### 4.3 Other observations for future work
 
@@ -335,6 +390,10 @@ including that a screenshot is taken on every attempt).
 - `src/agent/cli.py` would benefit from the same offline-testable treatment
   applied here to `agent.py`/`actions.py` — smoke tests with a stubbed
   `GUIAutomationAgent` are cheap and would catch entrypoint regressions.
+- Consider a `tests/test_tool_schemas.py`-style "does this actually bind to
+  a real chat model's schema converter" smoke test as a standing CI gate,
+  not just a one-off regression test — it's cheap (no network/model calls)
+  and would have caught §1.6 before it ever reached a live run.
 
 ---
 
@@ -342,8 +401,8 @@ including that a screenshot is taken on every attempt).
 
 | Deliverable | Status |
 |---|---|
-| Bug audit & fixes | 5 bugs fixed (2 critical: image corruption, DPI coordinates; 1 test-hermeticity; 2 minor), all with regression tests |
-| Test coverage expansion | 94 -> 358 tests; 32% -> 82% overall `src/` coverage; `agent` package taken from untestable (0%) to ~85%+ on core modules |
+| Bug audit & fixes | 7 bugs fixed (2 critical: image corruption, DPI coordinates; 2 found via live CLI runs: tool schema, unbounded max_tokens; 1 test-hermeticity; 2 minor), all with regression tests |
+| Test coverage expansion | 94 -> 364 tests; 32% -> 82% overall `src/` coverage; `agent` package taken from untestable (0%) to ~85%+ on core modules |
 | Feature extension | Fallback/retry grounding strategy (`locate_with_fallback`) + resilient `click_target` tool with dynamic re-capture retry |
 | Structured logging & observability | Centralized, env-configurable `logging` setup shared across both packages; latency/confidence logging on grounding + action execution |
 | `.env.example` | Added, documenting every `AGENT_*`, `GROUNDING_*`, `VLMRUN_*`, and `GUI_AGENT_LOG_*` variable |
