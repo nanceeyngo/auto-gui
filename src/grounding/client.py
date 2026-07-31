@@ -3,13 +3,20 @@ High-level client for interacting with grounding providers.
 """
 
 import asyncio
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from types import TracebackType
 from typing import Self, final, overload
 
 from .config import GroundingSettings
-from .exceptions import NoDefaultGroundingProviderError
+from .exceptions import (
+    GroundingError,
+    GroundingFallbackError,
+    GroundingProviderError,
+    GroundingRequestError,
+    NoDefaultGroundingProviderError,
+)
 from .interfaces import GroundingEngine
+from .logging_utils import get_logger
 from .models import (
     GroundingRequest,
     GroundingResponse,
@@ -19,6 +26,8 @@ from .registry import (
     GroundingProviderType,
     GroundingRegistry,
 )
+
+logger = get_logger("grounding.client")
 
 
 class GroundingClient:
@@ -157,14 +166,10 @@ class GroundingClient:
             return request
 
         if image is None:
-            raise ValueError(
-                "'image' is required when 'request' is not supplied."
-            )
+            raise ValueError("'image' is required when 'request' is not supplied.")
 
         if query is None:
-            raise ValueError(
-                "'query' is required when 'request' is not supplied."
-            )
+            raise ValueError("'query' is required when 'request' is not supplied.")
 
         return GroundingRequest(
             image=image,
@@ -254,6 +259,197 @@ class GroundingClient:
         return await self.get_provider(provider).alocate(request)
 
     # ------------------------------------------------------------------
+    # Fallback strategy
+    # ------------------------------------------------------------------
+    #
+    # Tries a sequence of providers in order (e.g. a fast/cheap model
+    # first, falling back to a higher-capacity model), moving to the
+    # next provider whenever the current one raises, returns no
+    # detections, or returns a best-detection confidence below
+    # `min_confidence`. Raises GroundingFallbackError, carrying every
+    # per-provider failure, if none of the providers succeed.
+
+    def _provider_acceptable(
+        self,
+        provider_id: str,
+        response: GroundingResponse,
+        min_confidence: float | None,
+    ) -> GroundingError | None:
+        """
+        Returns None if the response is acceptable, otherwise the
+        reason it was rejected.
+        """
+        if not response.success:
+            return GroundingRequestError(
+                f"Provider '{provider_id}' returned no usable detections "
+                f"(status={response.status})."
+            )
+
+        best = response.best_detection
+
+        if (
+            min_confidence is not None
+            and best is not None
+            and best.confidence is not None
+            and best.confidence < min_confidence
+        ):
+            return GroundingRequestError(
+                f"Provider '{provider_id}' best detection confidence "
+                f"{best.confidence:.3f} is below the required threshold "
+                f"{min_confidence:.3f}."
+            )
+
+        return None
+
+    @final
+    def locate_with_fallback(
+        self,
+        *,
+        providers: Sequence[str],
+        request: GroundingRequest | None = None,
+        image: ImageLike | None = None,
+        query: str | None = None,
+        top_k: int = 1,
+        confidence_threshold: float | None = None,
+        min_confidence: float | None = None,
+    ) -> GroundingResponse:
+        """
+        Locate a target, trying each provider in ``providers`` in
+        order until one returns an acceptable detection.
+
+        A provider's result is rejected -- causing the next provider
+        to be tried -- when the provider raises a
+        ``GroundingProviderError``, returns no detections, or its
+        best detection's confidence falls below ``min_confidence``.
+
+        Raises
+        ------
+        ValueError
+            If ``providers`` is empty.
+
+        GroundingFallbackError
+            If every provider fails or is rejected. The exception
+            carries a mapping of provider id -> failure reason.
+        """
+        if not providers:
+            raise ValueError("'providers' must contain at least one provider id.")
+
+        built_request = self._build_request(
+            request=request,
+            image=image,
+            query=query,
+            top_k=top_k,
+            confidence_threshold=confidence_threshold,
+        )
+
+        failures: dict[str, GroundingError] = {}
+
+        for provider_id in providers:
+            try:
+                response = self.get_provider(provider_id).locate(built_request)
+            except GroundingProviderError as exc:
+                logger.warning(
+                    "Grounding provider failed; trying next fallback",
+                    extra={
+                        "context": {
+                            "provider": provider_id,
+                            "exception_type": type(exc).__name__,
+                        }
+                    },
+                )
+                failures[provider_id] = exc
+                continue
+
+            rejection = self._provider_acceptable(provider_id, response, min_confidence)
+
+            if rejection is None:
+                if provider_id != providers[0]:
+                    logger.info(
+                        "Fallback grounding provider succeeded",
+                        extra={
+                            "context": {
+                                "provider": provider_id,
+                                "attempt": providers.index(provider_id) + 1,
+                            }
+                        },
+                    )
+                return response
+
+            logger.info(
+                "Grounding provider result rejected; trying next fallback",
+                extra={
+                    "context": {
+                        "provider": provider_id,
+                        "reason": str(rejection),
+                    }
+                },
+            )
+            failures[provider_id] = rejection
+
+        raise GroundingFallbackError(
+            "All configured grounding providers failed to produce an "
+            "acceptable detection.",
+            failures=failures,
+        )
+
+    @final
+    async def alocate_with_fallback(
+        self,
+        *,
+        providers: Sequence[str],
+        request: GroundingRequest | None = None,
+        image: ImageLike | None = None,
+        query: str | None = None,
+        top_k: int = 1,
+        confidence_threshold: float | None = None,
+        min_confidence: float | None = None,
+    ) -> GroundingResponse:
+        """
+        Asynchronous counterpart to ``locate_with_fallback``.
+        """
+        if not providers:
+            raise ValueError("'providers' must contain at least one provider id.")
+
+        built_request = self._build_request(
+            request=request,
+            image=image,
+            query=query,
+            top_k=top_k,
+            confidence_threshold=confidence_threshold,
+        )
+
+        failures: dict[str, GroundingError] = {}
+
+        for provider_id in providers:
+            try:
+                response = await self.get_provider(provider_id).alocate(built_request)
+            except GroundingProviderError as exc:
+                logger.warning(
+                    "Grounding provider failed; trying next fallback",
+                    extra={
+                        "context": {
+                            "provider": provider_id,
+                            "exception_type": type(exc).__name__,
+                        }
+                    },
+                )
+                failures[provider_id] = exc
+                continue
+
+            rejection = self._provider_acceptable(provider_id, response, min_confidence)
+
+            if rejection is None:
+                return response
+
+            failures[provider_id] = rejection
+
+        raise GroundingFallbackError(
+            "All configured grounding providers failed to produce an "
+            "acceptable detection.",
+            failures=failures,
+        )
+
+    # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------
 
@@ -285,9 +481,7 @@ class GroundingClient:
     async def aclose(self) -> None:
         provider_ids = tuple(self._registry)
 
-        await asyncio.gather(
-            *(self.get_provider(pid).aclose() for pid in provider_ids)
-        )
+        await asyncio.gather(*(self.get_provider(pid).aclose() for pid in provider_ids))
 
         self._providers.clear()
 

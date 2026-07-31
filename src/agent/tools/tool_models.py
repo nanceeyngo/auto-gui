@@ -80,15 +80,40 @@ class LocateToolInput(BaseModel):
     )
     query: str = Field(
         ...,
-        description=(
-            "Natural language description of the UI element to locate."
-        ),
+        description=("Natural language description of the UI element to locate."),
     )
     provider: str | None = Field(
+        default=None,
+        description=("Optional; name of grounding provider for UI element location."),
+    )
+
+
+class ClickTargetToolInput(BaseModel):
+    """
+    Input for the resilient `click_target` tool.
+
+    Combines grounding + clicking + visual verification, automatically
+    re-capturing the screen and retrying when the target cannot be
+    located or the click does not appear to have taken effect.
+    """
+
+    query: str = Field(
         ...,
-        description=(
-            "Optional; name of grounding provider for UI element location."
-        ),
+        description=("Natural language description of the UI element to click."),
+    )
+
+    button: MouseButton = "left"
+
+    provider: str | None = Field(
+        default=None,
+        description="Optional; name of grounding provider to use.",
+    )
+
+    max_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=10,
+        description="Maximum number of locate+click attempts.",
     )
 
 

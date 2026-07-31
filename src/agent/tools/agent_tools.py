@@ -5,16 +5,20 @@ These tools expose a simplified, JSON-serializable interface over the
 automation library.
 """
 
+import math
 from collections.abc import Sequence
 
 from langchain_core.tools import BaseTool, tool
 from langgraph.runtime import Runtime
 
+from grounding.exceptions import GroundingProviderError
 from grounding.models import GroundingResponse
 
 from ..context import AgentContext
+from ..logging_config import get_logger
 from .action.action_models import ActionResult
 from .tool_models import (
+    ClickTargetToolInput,
     ClickToolInput,
     DragToolInput,
     HotkeyToolInput,
@@ -24,6 +28,13 @@ from .tool_models import (
     TypeTextToolInput,
     WaitToolInput,
 )
+
+logger = get_logger("agent.tools.agent_tools")
+
+# Two detections are treated as "the same still-present element" (and
+# therefore evidence that a click did not register) when their centers
+# are within this many pixels of one another.
+_SAME_ELEMENT_PIXEL_TOLERANCE = 12.0
 
 # ---------------------------------------------------------------------------
 # Screenshots
@@ -150,6 +161,134 @@ def right_click(
     return result
 
 
+def _detections_at_same_spot(
+    a: tuple[int, int],
+    b: tuple[int, int],
+    *,
+    tolerance: float = _SAME_ELEMENT_PIXEL_TOLERANCE,
+) -> bool:
+    return math.dist(a, b) <= tolerance
+
+
+@tool(
+    args_schema=ClickTargetToolInput,
+    description=(
+        "Locate a UI element by natural-language description and click "
+        "it. Automatically re-captures the screen and retries (up to "
+        "max_attempts times) if the element cannot be located, or if "
+        "the same element is still visible in the same place "
+        "immediately after clicking (a strong signal the click did not "
+        "register). Prefer this over calling `locate` followed by "
+        "`click` separately, since it is self-correcting."
+    ),
+)
+def click_target(
+    click_target_input: ClickTargetToolInput,
+    runtime: Runtime[AgentContext],
+) -> ActionResult:
+    """
+    Locate-and-click a UI element with automatic retry and dynamic
+    re-capture of the screen on apparent click failure.
+    """
+    context = runtime.context
+    services = context.services
+
+    last_result: ActionResult | None = None
+
+    for attempt in range(1, click_target_input.max_attempts + 1):
+        screenshot = services.screenshots.capture()
+        context.last_screenshot = screenshot
+
+        try:
+            response = services.grounding.locate(
+                screenshot=screenshot,
+                query=click_target_input.query,
+                provider=click_target_input.provider,
+            )
+        except GroundingProviderError as exc:
+            logger.warning(
+                "click_target: grounding failed, retrying",
+                extra={
+                    "context": {
+                        "query": click_target_input.query,
+                        "attempt": attempt,
+                        "exception_type": type(exc).__name__,
+                    }
+                },
+            )
+            continue
+
+        context.grounding_response = response
+
+        if not response.success or response.best_detection is None:
+            logger.info(
+                "click_target: no detection, retrying",
+                extra={
+                    "context": {
+                        "query": click_target_input.query,
+                        "attempt": attempt,
+                        "status": response.status,
+                    }
+                },
+            )
+            continue
+
+        detection = response.best_detection
+        context.selected_detection = detection
+
+        result = services.actions.click(
+            target=detection.center,
+            button=click_target_input.button,
+        )
+        context.last_action = result
+        last_result = result
+
+        # Dynamically re-capture and re-locate to verify the click
+        # actually had an effect on the UI.
+        verification_screenshot = services.screenshots.capture()
+
+        try:
+            verification = services.grounding.locate(
+                screenshot=verification_screenshot,
+                query=click_target_input.query,
+                provider=click_target_input.provider,
+            )
+        except GroundingProviderError:
+            # Cannot verify; assume the click succeeded rather than
+            # looping forever on a grounding outage.
+            return result
+
+        still_present = verification.best_detection
+
+        click_likely_failed = (
+            verification.success
+            and still_present is not None
+            and _detections_at_same_spot(detection.center, still_present.center)
+        )
+
+        if not click_likely_failed:
+            return result
+
+        logger.info(
+            "click_target: element still present after click, retrying",
+            extra={
+                "context": {
+                    "query": click_target_input.query,
+                    "attempt": attempt,
+                }
+            },
+        )
+
+    if last_result is not None:
+        return last_result
+
+    raise GroundingProviderError(
+        f"Unable to locate a clickable match for "
+        f"{click_target_input.query!r} after "
+        f"{click_target_input.max_attempts} attempts."
+    )
+
+
 @tool(
     args_schema=DragToolInput,
     description="Drag from one detected UI element to another.",
@@ -189,9 +328,7 @@ def type_text(
     Type text using the keyboard into the currently focused input.
     """
     context = runtime.context
-    result: ActionResult = context.services.actions.type_text(
-        typing_input.text
-    )
+    result: ActionResult = context.services.actions.type_text(typing_input.text)
     context.last_action = result
 
     return result
@@ -238,9 +375,7 @@ def hotkey(
 
 @tool(
     args_schema=WaitToolInput,
-    description=(
-        "Wait for a given number of seconds before taking next action."
-    ),
+    description=("Wait for a given number of seconds before taking next action."),
 )
 def wait(
     delay: WaitToolInput,
@@ -260,6 +395,7 @@ GUI_AGENT_TOOLS: Sequence[BaseTool] = (
     capture_screen,
     locate,
     click,
+    click_target,
     double_click,
     right_click,
     drag,
@@ -274,6 +410,7 @@ __all__ = [
     "GUI_AGENT_TOOLS",
     "capture_screen",
     "click",
+    "click_target",
     "double_click",
     "drag",
     "hotkey",
