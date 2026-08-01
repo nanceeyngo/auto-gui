@@ -25,12 +25,12 @@ class TestCreateVlm:
         """
         monkeypatch.setattr(
             "agent.vlm.settings",
-            AgentSettings(max_tokens=2048, api_key=SecretStr("test-dummy-key")),
+            AgentSettings(max_tokens=1052, api_key=SecretStr("test-dummy-key")),
         )
 
         model = create_vlm()
 
-        assert cast(Any, model).max_tokens == 2048
+        assert cast(Any, model).max_tokens == 1052
 
     def test_max_tokens_can_be_disabled_explicitly(
         self, monkeypatch: pytest.MonkeyPatch
