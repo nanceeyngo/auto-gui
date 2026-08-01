@@ -73,7 +73,7 @@ class AgentSettings(BaseSettings):
     )
 
     max_tokens: int | None = Field(
-        default=2048,
+        default=1052,
         gt=0,
         description=(
             "Maximum number of tokens the language model may generate "

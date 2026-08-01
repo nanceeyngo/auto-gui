@@ -9,21 +9,6 @@ from langchain_openai import ChatOpenAI
 
 from .config import settings
 
-# def create_vlm() -> BaseChatModel:
-#     """
-#     Create a configured vision-language model.
-#     """
-#     init_kwargs: dict[str, Any] = {
-#         "model": settings.model,
-#         "temperature": settings.temperature,
-#         "timeout": settings.request_timeout,
-#         "max_tokens": settings.max_tokens,
-#         "api_key": settings.api_key if settings.api_key is not None else None,
-#         "base_url": settings.base_url,
-#         "seed": settings.seed,
-#     }
-#     return ChatOpenAI(**init_kwargs)
-
 
 def create_vlm() -> BaseChatModel:
     """
