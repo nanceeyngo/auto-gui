@@ -219,9 +219,7 @@ Example:
 
 ```python
 response = locate_image(
-    image="desktop.png",
-    query="Search box",
-    provider=vlmrun_provider
+    image="desktop.png", query="Search box", provider=vlmrun_provider
 )
 ```
 

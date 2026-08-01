@@ -35,7 +35,7 @@ types-python-dateutil = "*"
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.13"
 mypy = "^1.18"
-pre-commit = "^5"
+pre-commit = "^4"
 
 pytest = "^9.1"
 pytest-asyncio = "^1.4"
@@ -87,7 +87,7 @@ build-backend = "poetry.core.masonry.api"
 # --------------------------------------------------------------------
 
 [tool.ruff]
-line-length = 79
+line-length = 88
 target-version = "py312"
 
 
